@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Database files (sensitive data)
+controlDB.db
+pbn_content_database.db
+*.db
+
+# PyInstaller
+*.manifest
+*.spec
+build/
+dist/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Test output files
+test_*.html
+test_*.json
+
+# Cache directories
+embedding_cache/
+.cache/
+
+# Image files (Korean filenames - likely test/demo content)
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Data directories with sensitive content
+data/
+last_project/
+custom_project/
