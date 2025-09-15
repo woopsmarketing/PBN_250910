@@ -19,6 +19,8 @@ import xmlrpc.client
 from wordpress_xmlrpc import Client
 from wordpress_xmlrpc.methods import media, posts
 from wordpress_xmlrpc.compat import xmlrpc_client
+from pathlib import Path
+import io
 
 # 기존 모듈 import
 from controlDB import (
@@ -102,6 +104,74 @@ def is_positive_int(x):
     return x.isdigit() and int(x) > 0
 
 
+class ImageOptimizer:
+    """이미지 최적화 클래스"""
+
+    def __init__(self):
+        self.supported_formats = ["PNG", "JPEG", "WEBP"]
+
+    def optimize_for_web(
+        self,
+        image_path: Path,
+        max_size: tuple = (512, 512),
+        target_file_size_kb: int = 50,
+        quality_range: tuple = (70, 90),
+    ) -> Dict[str, Any]:
+        """
+        웹용 이미지 최적화
+
+        Args:
+            image_path: 이미지 파일 경로
+            max_size: 최대 크기 (width, height)
+            target_file_size_kb: 목표 파일 크기 (KB)
+            quality_range: 품질 범위 (min, max)
+
+        Returns:
+            최적화 결과 딕셔너리
+        """
+        try:
+            original_size = image_path.stat().st_size
+            original_size_kb = original_size / 1024
+
+            # 이미지 열기
+            with Image.open(image_path) as img:
+                # RGB로 변환 (PNG는 투명도 지원하므로)
+                if img.mode in ("RGBA", "LA"):
+                    # 투명 배경을 흰색으로 변환
+                    background = Image.new("RGB", img.size, (255, 255, 255))
+                    if img.mode == "RGBA":
+                        background.paste(img, mask=img.split()[-1])
+                    else:
+                        background.paste(img)
+                    img = background
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+
+                # 크기 조정
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+                # PNG로 저장 (원본 형식 유지)
+                img.save(image_path, "PNG", optimize=True)
+
+            # 최종 크기 확인
+            final_size = image_path.stat().st_size
+            final_size_kb = final_size / 1024
+            reduction_percent = (
+                (original_size_kb - final_size_kb) / original_size_kb
+            ) * 100
+
+            return {
+                "success": True,
+                "original_size_kb": round(original_size_kb, 2),
+                "final_size_kb": round(final_size_kb, 2),
+                "size_reduction_percent": round(reduction_percent, 2),
+                "file_size_change": f"{original_size_kb:.1f}KB → {final_size_kb:.1f}KB",
+            }
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
 class EnhancedPBNSystem:
     """고도화된 PBN 백링크 자동화 시스템"""
 
@@ -110,6 +180,14 @@ class EnhancedPBNSystem:
         self.db = ControlDB()
         self.wp_manager = WordPressManager()
         self.html_converter = SimpleHTMLConverter()
+
+        # OpenAI 클라이언트 초기화 (이미지 생성용)
+        load_dotenv()
+        self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        # 이미지 관련 초기화
+        self.image_optimizer = ImageOptimizer()
+        self.cost_tracker = {"total_images": 0, "image_details": []}
 
         # 새로운 링크 빌딩 시스템 초기화
         print("🔗 링크 빌딩 시스템 초기화 중...")
@@ -174,6 +252,148 @@ class EnhancedPBNSystem:
         if not frag:
             frag = "output"
         return frag[:max_len]
+
+    def convert_to_blog_html_structure(
+        self, html_content: str, sections: List[Dict]
+    ) -> str:
+        """HTML을 original_html 구조로 변환 (fs- 프리픽스 클래스 사용)"""
+        import re
+
+        # 1. 기본 article 구조로 감싸기 (이미 article이 있으면 감싸지 않음)
+        if "<article" not in html_content:
+            original_html = f'<article class="fs-article">\n{html_content}\n</article>'
+        else:
+            original_html = html_content
+
+        # 2. 목차 섹션을 nav 태그로 변환 (더 간결하게)
+        original_html = self._convert_toc_to_nav_simple(original_html)
+
+        # 3. 용어 정리 섹션 변환
+        original_html = self._convert_terms_section_structure(original_html)
+
+        # 4. div를 section으로 변환 (fs- 클래스 적용)
+        original_html = re.sub(
+            r"<div[^>]*>", '<section class="fs-section">', original_html
+        )
+        original_html = re.sub(r"</div>", "</section>", original_html)
+
+        # 5. 제목 태그에 클래스 추가 (더 간결하게)
+        original_html = self._add_heading_classes_simple(original_html)
+
+        # 6. 목록에 클래스 추가
+        original_html = self._add_list_classes(original_html)
+
+        # 7. 테이블에 클래스 추가
+        original_html = self._add_table_classes(original_html)
+
+        # 8. 특별한 섹션 클래스 추가
+        original_html = self._add_special_section_classes(original_html)
+
+        # 9. HTML 정리
+        original_html = self._cleanup_blog_html(original_html)
+
+        return original_html
+
+    def _convert_toc_to_nav(self, content: str) -> str:
+        """목차 섹션을 nav 태그로 변환"""
+        toc_pattern = r'<h2[^>]*id="toc-section"[^>]*>\[목차\](.*?)</h2>'
+        toc_replacement = r'<nav class="fs-toc">\n<h2 id="toc-section" class="fs-h2">목차</h2>\n\1\n</nav>'
+        return re.sub(toc_pattern, toc_replacement, content, flags=re.DOTALL)
+
+    def _convert_toc_to_nav_simple(self, content: str) -> str:
+        """목차 섹션을 nav 태그로 변환 (간결한 버전)"""
+        toc_pattern = r'<h2[^>]*id="toc-section"[^>]*>\[목차\](.*?)</h2>'
+        toc_replacement = (
+            r'<nav class="fs-toc">\n<h2 class="fs-h2">목차</h2>\n\1\n</nav>'
+        )
+        return re.sub(toc_pattern, toc_replacement, content, flags=re.DOTALL)
+
+    def _convert_terms_section_structure(self, content: str) -> str:
+        """용어 정리 섹션 구조 변환"""
+        # 용어 정리 섹션 변환
+        terms_pattern = r'<h2[^>]*id="핵심-용어-정리"[^>]*>\[용어\](.*?)</h2>'
+        terms_replacement = r'<h2 id="핵심-용어-정리" class="fs-h2">핵심 용어 정리</h2>'
+        content = re.sub(terms_pattern, terms_replacement, content, flags=re.DOTALL)
+
+        # 용어 정의 리스트에 클래스 추가
+        content = re.sub(r"<dl[^>]*>", '<dl class="fs-terms">', content)
+        content = re.sub(r"<dt[^>]*>", '<dt class="fs-term-name">', content)
+        content = re.sub(r"<dd[^>]*>", '<dd class="fs-term-description">', content)
+
+        return content
+
+    def _add_heading_classes(self, content: str) -> str:
+        """제목 태그에 클래스 추가 (중복 클래스 방지)"""
+        # 기존 클래스가 있으면 제거하고 새로 추가
+        content = re.sub(r'<h1[^>]*class="[^"]*"[^>]*>', "<h1>", content)
+        content = re.sub(r'<h2[^>]*class="[^"]*"[^>]*>', "<h2>", content)
+        content = re.sub(r'<h3[^>]*class="[^"]*"[^>]*>', "<h3>", content)
+        content = re.sub(r'<h4[^>]*class="[^"]*"[^>]*>', "<h4>", content)
+
+        # fs- 클래스 추가
+        content = re.sub(r"<h1([^>]*)>", r'<h1\1 class="fs-h1">', content)
+        content = re.sub(r"<h2([^>]*)>", r'<h2\1 class="fs-h2">', content)
+        content = re.sub(r"<h3([^>]*)>", r'<h3\1 class="fs-h3">', content)
+        content = re.sub(r"<h4([^>]*)>", r'<h4\1 class="fs-h4">', content)
+
+        return content
+
+    def _add_heading_classes_simple(self, content: str) -> str:
+        """제목 태그에 클래스 추가 (간결한 버전)"""
+        # fs- 클래스 직접 추가 (기존 클래스 고려하지 않음)
+        content = re.sub(r"<h1([^>]*)>", r'<h1 class="fs-h1">', content)
+        content = re.sub(r"<h2([^>]*)>", r'<h2 class="fs-h2">', content)
+        content = re.sub(r"<h3([^>]*)>", r'<h3 class="fs-h3">', content)
+        content = re.sub(r"<h4([^>]*)>", r'<h4 class="fs-h4">', content)
+
+        return content
+
+    def _add_list_classes(self, content: str) -> str:
+        """목록에 클래스 추가"""
+        content = re.sub(r"<ul[^>]*>", '<ul class="fs-list">', content)
+        content = re.sub(r"<ol[^>]*>", '<ol class="fs-toc-list">', content)
+        content = re.sub(r"<li[^>]*>", '<li class="fs-list-item">', content)
+        return content
+
+    def _add_table_classes(self, content: str) -> str:
+        """테이블에 클래스 추가"""
+        content = re.sub(r"<table[^>]*>", '<table class="fs-table">', content)
+        content = re.sub(r"<thead[^>]*>", "<thead>", content)
+        content = re.sub(r"<tbody[^>]*>", "<tbody>", content)
+        content = re.sub(r"<tr[^>]*>", "<tr>", content)
+        content = re.sub(r"<th[^>]*>", '<th class="fs-table-header">', content)
+        content = re.sub(r"<td[^>]*>", '<td class="fs-table-cell">', content)
+        return content
+
+    def _add_special_section_classes(self, content: str) -> str:
+        """특별한 섹션에 클래스 추가"""
+        # 개요 섹션
+        content = re.sub(
+            r'<section class="fs-section">\s*<h2[^>]*id="개요"',
+            '<section class="fs-section fs-intro">\n<h2 id="개요"',
+            content,
+        )
+        # 요약과 결론 섹션
+        content = re.sub(
+            r'<section class="fs-section">\s*<h2[^>]*id="요약과-결론"',
+            '<section class="fs-section fs-conclusion">\n<h2 id="요약과-결론"',
+            content,
+        )
+        # FAQ 섹션
+        content = re.sub(
+            r'<section class="fs-section">\s*<h2[^>]*id="자주-묻는-질문"',
+            '<section class="fs-section fs-faq">\n<h2 id="자주-묻는-질문"',
+            content,
+        )
+        return content
+
+    def _cleanup_blog_html(self, content: str) -> str:
+        """HTML 정리 작업"""
+        # 연속된 빈 줄 제거
+        content = re.sub(r"\n\s*\n\s*\n", "\n\n", content)
+        # 시작과 끝 공백 제거
+        content = content.strip()
+        return content
 
     def save_debug_data(
         self, keyword: str, step: str, data: Any, file_extension: str = "json"
@@ -604,9 +824,8 @@ class EnhancedPBNSystem:
 
         # 키워드 생성 호출
         keywords_response = self.llm.chat.completions.create(
-            model="gpt-4",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": keywords_prompt}],
-            temperature=0.7,
         )
 
         try:
@@ -644,9 +863,8 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
 
         # 제목 생성
         title_response = self.llm.chat.completions.create(
-            model="gpt-4",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": title_prompt}],
-            temperature=0.8,
         )
         generated_title = title_response.choices[0].message.content.strip().strip('"')
 
@@ -719,9 +937,8 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
 """
 
         response = self.llm.chat.completions.create(
-            model="gpt-4",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
         )
         duration = time.time() - start_time
         prompt_tokens = int(len(prompt.split()) * 1.3)
@@ -837,9 +1054,8 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
 """
 
         response = self.llm.chat.completions.create(
-            model="gpt-4",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
         )
         duration = time.time() - start_time
         prompt_tokens = int(len(prompt.split()) * 1.3)
@@ -866,15 +1082,14 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
 요약:
 """
         response = self.llm.chat.completions.create(
-            model="gpt-4",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
         )
         return response.choices[0].message.content.strip()
 
     def generate_table_of_contents(self, sections_content: List[Dict]) -> str:
         """H2 기반 목차 생성 (앵커 링크 포함, 핵심 용어 정리 포함)"""
-        toc_lines = ["## 📚 목차\n"]
+        toc_lines = ["## 목차\n"]
 
         # 첫 번째: 핵심 용어 정리
         toc_lines.append("1. [핵심 용어 정리](#핵심-용어-정리)")
@@ -923,13 +1138,12 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
 """
 
         response = self.llm.chat.completions.create(
-            model="gpt-4",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
         )
 
         # 용어 섹션 포맷팅 (앙커 ID 포함)
-        terms_section = '<h2 id="terms-section">📖 핵심 용어 정리</h2>\n\n'
+        terms_section = '<h2 id="terms-section"> 핵심 용어 정리</h2>\n\n'
         terms_section += "본문을 읽기 전에 알아두면 좋은 용어들입니다.\n\n"
 
         # LLM 응답을 파싱하여 용어 정리 (개선된 파싱)
@@ -1035,7 +1249,7 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
         return md_content
 
     async def generate_enhanced_content(
-        self, client_tuple, keyword: str, pbn_site
+        self, client_tuple, keyword: str, pbn_site: Dict[str, Any] = None
     ) -> Optional[Dict[str, Any]]:
         """고도화된 RAG 파이프라인으로 콘텐츠를 생성합니다."""
         try:
@@ -1097,10 +1311,21 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
                 # 다음을 위한 요약 생성
                 prev_summary = await self.summarize_previous(content)
 
+            # 4. 이미지 생성 및 저장
+            print("🖼️ 이미지 생성 중...")
+            images = await self.generate_and_save_images(
+                title=tk["title"],
+                sections=sections,
+                keyword=keyword,
+                lsi_keywords=tk.get("lsi_keywords", []),
+                longtail_keywords=tk.get("longtail_keywords", []),
+                pbn_site=pbn_site,  # PBN 사이트 정보 전달하여 즉시 업로드
+            )
+
             print(f"✅ 섹션 콘텐츠 생성 완료: {len(sections_content)}개")
 
             # 4. 목차 생성
-            print("📚 목차 생성 중...")
+            print("목차 생성 중...")
             table_of_contents = self.generate_table_of_contents(sections_content)
             print("✅ 목차 생성 완료")
 
@@ -1155,6 +1380,7 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
                     "longtail_keywords": tk.get("longtail_keywords", []),
                 },
                 "sections": sections_content,
+                "images": images,  # 생성된 이미지 정보 추가
             }
 
             # 9. 디버깅용 파일 저장
@@ -1187,6 +1413,481 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
 
             traceback.print_exc()
             return None
+
+    async def generate_image(self, prompt: str, purpose: str) -> Optional[str]:
+        """이미지 생성 (gpt-image-1 모델 사용)
+
+        Args:
+            prompt: 이미지 생성을 위한 영문 프롬프트
+            purpose: 이미지 용도 (cost tracking용)
+
+        Returns:
+            생성된 이미지의 base64 문자열 또는 None
+        """
+        try:
+            start_time = time.time()
+
+            # OpenAI Image API 호출 (gpt-image-1은 항상 base64로 반환)
+            response = self.openai_client.images.generate(
+                model="gpt-image-1",
+                prompt=prompt,
+                quality="low",  # 저품질 (가격 효율성)
+                size="1024x1024",  # 표준 사이즈
+                n=1,  # 1개 이미지
+            )
+
+            duration = time.time() - start_time
+
+            # 비용 계산 (gpt-image-1 low quality 1024x1024: $0.011)
+            image_cost = 0.011
+
+            # 이미지 생성 추적
+            self.cost_tracker["total_images"] += 1
+            self.cost_tracker["image_details"].append(
+                {
+                    "purpose": purpose,
+                    "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "duration_seconds": duration,
+                    "prompt": prompt[:100] + "..." if len(prompt) > 100 else prompt,
+                    "cost_usd": image_cost,
+                    "model": "gpt-image-1",
+                    "quality": "low",
+                    "size": "1024x1024",
+                }
+            )
+
+            # base64 이미지 데이터 반환 (gpt-image-1은 항상 b64_json 형태)
+            return response.data[0].b64_json
+
+        except Exception as e:
+            print(f"이미지 생성 실패 ({purpose}): {e}")
+            return None
+
+    def save_image_from_base64(
+        self, b64_data: str, file_path: Path, optimize: bool = True
+    ) -> bool:
+        """base64 이미지 데이터를 파일로 저장 및 최적화
+
+        Args:
+            b64_data: base64 인코딩된 이미지 데이터
+            file_path: 저장할 파일 경로
+            optimize: 이미지 최적화 여부
+
+        Returns:
+            저장 성공 여부
+        """
+        try:
+            # base64 디코딩하여 PNG 파일로 저장
+            image_data = base64.b64decode(b64_data)
+            file_path.parent.mkdir(exist_ok=True)
+
+            with open(file_path, "wb") as f:
+                f.write(image_data)
+
+            # 이미지 최적화 (옵션)
+            if optimize:
+                # 블로그용 최적화: 512x512 이하, 50KB 이하로 압축
+                optimization_result = self.image_optimizer.optimize_for_web(
+                    file_path,
+                    max_size=(512, 512),
+                    target_file_size_kb=50,
+                    quality_range=(70, 90),
+                )
+
+                if optimization_result["success"]:
+                    reduction = optimization_result["size_reduction_percent"]
+                    print(
+                        f"     📉 이미지 최적화: {optimization_result['file_size_change']} ({reduction}% 감소)"
+                    )
+                else:
+                    print(
+                        f"     ⚠️ 이미지 최적화 실패: {optimization_result.get('error', '알 수 없는 오류')}"
+                    )
+
+            return True
+        except Exception as e:
+            print(f"이미지 저장 실패: {e}")
+            return False
+
+    async def generate_and_save_images(
+        self,
+        title: str,
+        sections: List[Dict],
+        keyword: str,
+        lsi_keywords: List[str] = None,
+        longtail_keywords: List[str] = None,
+        pbn_site: Dict[str, Any] = None,
+    ) -> Dict[str, str]:
+        """메인 및 섹션별 이미지 생성, 저장 및 즉시 워드프레스 업로드
+
+        Args:
+            title: 블로그 제목
+            sections: 섹션 리스트
+            keyword: 메인 키워드
+            lsi_keywords: LSI 키워드 리스트
+            longtail_keywords: 롱테일 키워드 리스트
+            pbn_site: PBN 사이트 정보 (워드프레스 업로드용)
+
+        Returns:
+            이미지 URL 딕셔너리 {"main": "url", "section_1": "url", ...}
+        """
+        images = {}
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_keyword = self._safe_fragment(keyword)
+        images_dir = Path("images")
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. 메인 이미지 생성 (100% 확률)
+        print("4. 이미지 생성 중...")
+        main_prompt = f"Create a professional diagram or infographic about '{title}'. Chart, concept diagram, or infographic style. No text or words in the image. Clean, modern design."
+
+        main_image_data = await self.generate_image(
+            main_prompt, f"메인 이미지: {title}"
+        )
+        if main_image_data:
+            main_image_path = images_dir / f"main_{safe_keyword}_{timestamp}.png"
+            if self.save_image_from_base64(
+                main_image_data, main_image_path, optimize=True
+            ):
+                # 즉시 워드프레스에 업로드
+                if pbn_site:
+                    uploaded_url = await self.upload_single_image_to_wordpress(
+                        main_image_path, pbn_site, f"메인 이미지: {title}"
+                    )
+                    if uploaded_url:
+                        images["main"] = uploaded_url
+                        print(
+                            f"   ✅ 메인 이미지 생성 및 업로드: {main_image_path.name}"
+                        )
+                    else:
+                        images["main"] = str(main_image_path)
+                        print(
+                            f"   ⚠️ 메인 이미지 생성 완료 (업로드 실패): {main_image_path.name}"
+                        )
+                else:
+                    images["main"] = str(main_image_path)
+                    print(f"   ✅ 메인 이미지 생성: {main_image_path.name}")
+
+        # 2. 섹션별 이미지 생성 (33% 확률)
+        for i, section in enumerate(sections):
+            if random.random() <= 0.33:  # 33% 확률
+                # 실제 섹션 제목 사용 (h2 또는 h2_title)
+                section_title = section.get(
+                    "h2", section.get("h2_title", f"섹션 {i+1}")
+                )
+                section_prompt = f"Create a diagram or concept illustration about '{section_title}'. Professional infographic style. No text or words. Clean design."
+
+                section_image_data = await self.generate_image(
+                    section_prompt, f"섹션 이미지: {section_title}"
+                )
+                if section_image_data:
+                    section_image_path = (
+                        images_dir / f"section_{i+1}_{safe_keyword}_{timestamp}.png"
+                    )
+                    if self.save_image_from_base64(
+                        section_image_data, section_image_path, optimize=True
+                    ):
+                        # 즉시 워드프레스에 업로드
+                        if pbn_site:
+                            uploaded_url = await self.upload_single_image_to_wordpress(
+                                section_image_path,
+                                pbn_site,
+                                f"섹션 이미지: {section_title}",
+                            )
+                            if uploaded_url:
+                                images[f"section_{i+1}"] = uploaded_url
+                                print(
+                                    f"   ✅ 섹션 {i+1} 이미지 생성 및 업로드: {section_image_path.name}"
+                                )
+                            else:
+                                images[f"section_{i+1}"] = str(section_image_path)
+                                print(
+                                    f"   ⚠️ 섹션 {i+1} 이미지 생성 완료 (업로드 실패): {section_image_path.name}"
+                                )
+                        else:
+                            images[f"section_{i+1}"] = str(section_image_path)
+                            print(
+                                f"   ✅ 섹션 {i+1} 이미지 생성: {section_image_path.name}"
+                            )
+
+        return images
+
+    async def upload_single_image_to_wordpress(
+        self, image_path: Path, pbn_site: Dict[str, Any], alt_text: str = ""
+    ) -> Optional[str]:
+        """단일 이미지를 워드프레스에 업로드하고 URL 반환"""
+        try:
+            site_url = pbn_site["site_url"]
+            username = pbn_site["username"]
+            app_password = pbn_site["app_password"]
+
+            print(f"   📤 이미지 업로드 중: {image_path.name}")
+
+            # WordPressManager를 사용한 업로드
+            upload_result = self.wp_manager.upload_image_to_wordpress(
+                site_url=site_url,
+                username=username,
+                app_password=app_password,
+                image_path=str(image_path),
+                image_name=image_path.name,
+            )
+
+            if isinstance(upload_result, tuple):
+                image_id, image_url = upload_result
+            elif isinstance(upload_result, dict):
+                image_id = upload_result.get("id")
+                image_url = upload_result.get("url")
+            else:
+                print(
+                    f"   ❌ 업로드 결과 형식이 예상과 다릅니다: {type(upload_result)}"
+                )
+                return None
+
+            if image_id and image_url:
+                print(f"   ✅ 이미지 업로드 완료: {image_url}")
+                return image_url
+            else:
+                print(f"   ❌ 이미지 업로드 실패 (ID: {image_id}, URL: {image_url})")
+                return None
+
+        except Exception as e:
+            print(f"   ❌ 이미지 업로드 중 오류: {e}")
+            import traceback
+
+            print(f"   🔍 상세 오류: {traceback.format_exc()}")
+            return None
+
+    async def upload_images_to_wordpress(
+        self, images: Dict[str, str], pbn_site: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """
+        생성된 이미지들을 WordPress에 업로드하고 URL을 반환합니다.
+
+        Args:
+            images: 이미지 경로 딕셔너리 {"main": "path", "section_1": "path", ...}
+            pbn_site: PBN 사이트 정보
+
+        Returns:
+            업로드된 이미지 URL 딕셔너리 {"main": "url", "section_1": "url", ...}
+        """
+        uploaded_images = {}
+
+        if not images:
+            print("   📷 업로드할 이미지가 없습니다.")
+            return uploaded_images
+
+        site_url = pbn_site.get("site_url", "")
+        username = pbn_site.get("username", "")
+        app_password = pbn_site.get("app_password", "")
+
+        if not all([site_url, username, app_password]):
+            print("   ❌ PBN 사이트 정보가 불완전합니다.")
+            return uploaded_images
+
+        print(f"   📤 {len(images)}개 이미지 업로드 시작...")
+
+        for image_type, image_path in images.items():
+            try:
+                print(f"   📤 {image_type} 이미지 업로드 중...")
+
+                # 이미지 경로가 문자열인지 확인
+                if not isinstance(image_path, str):
+                    print(
+                        f"   ❌ {image_type} 이미지 경로가 문자열이 아닙니다: {type(image_path)}"
+                    )
+                    continue
+
+                # 파일 존재 확인
+                if not Path(image_path).exists():
+                    print(
+                        f"   ❌ {image_type} 이미지 파일이 존재하지 않습니다: {image_path}"
+                    )
+                    continue
+
+                # 이미지 파일명 생성
+                image_name = f"{image_type}_{Path(image_path).stem}.jpg"
+                print(f"   📝 업로드할 파일명: {image_name}")
+
+                # WordPress에 업로드
+                upload_result = self.wp_manager.upload_image_to_wordpress(
+                    site_url=site_url,
+                    username=username,
+                    app_password=app_password,
+                    image_path=image_path,
+                    image_name=image_name,
+                )
+
+                # 결과 처리 (tuple 또는 dict 형태일 수 있음)
+                if isinstance(upload_result, tuple):
+                    image_id, image_url = upload_result
+                elif isinstance(upload_result, dict):
+                    image_id = upload_result.get("id")
+                    image_url = upload_result.get("url")
+                else:
+                    print(
+                        f"   ❌ {image_type} 업로드 결과 형식이 예상과 다릅니다: {type(upload_result)}"
+                    )
+                    continue
+
+                if image_id and image_url:
+                    uploaded_images[image_type] = image_url
+                    print(f"   ✅ {image_type} 이미지 업로드 완료: {image_url}")
+                else:
+                    print(
+                        f"   ❌ {image_type} 이미지 업로드 실패 (ID: {image_id}, URL: {image_url})"
+                    )
+
+            except Exception as e:
+                print(f"   ❌ {image_type} 이미지 업로드 중 오류: {e}")
+                import traceback
+
+                print(f"   🔍 상세 오류: {traceback.format_exc()}")
+
+        return uploaded_images
+
+    def insert_images_into_content(
+        self, content: str, images: Dict[str, str], sections: List[Dict]
+    ) -> str:
+        """
+        콘텐츠에 이미지를 삽입합니다.
+
+        Args:
+            content: 원본 HTML 콘텐츠
+            images: 이미지 URL 딕셔너리 {"main": "url", "section_1": "url", ...}
+            sections: 섹션 리스트
+
+        Returns:
+            이미지가 삽입된 HTML 콘텐츠
+        """
+        if not images:
+            return content
+
+        # 메인 이미지를 목차 아래에 삽입
+        if "main" in images:
+            main_image_html = f"""<figure class="fs-figure">
+<img src="{images['main']}" alt="메인 이미지" loading="lazy">
+</figure>
+"""
+            # nav 태그 아래에 이미지 삽입
+            if "<nav" in content and "</nav>" in content:
+                content = re.sub(
+                    r"(</nav>\s*)",
+                    r"\1" + main_image_html + r"\n",
+                    content,
+                    flags=re.DOTALL,
+                )
+            elif "<article" in content:
+                # nav가 없으면 article 바로 아래 첫 번째 태그 위에 삽입
+                content = re.sub(
+                    r"(<article[^>]*>\s*)(<[^>]+>)",
+                    r"\1" + main_image_html + r"\n\2",
+                    content,
+                    flags=re.DOTALL,
+                )
+            else:
+                # article 태그가 없으면 콘텐츠 시작 부분에 삽입
+                content = main_image_html + content
+
+        # 섹션별 이미지 삽입
+        # 실제 HTML에서는 목차 + 핵심용어정리 섹션이 추가되므로 인덱스 +2 조정
+        for i, section in enumerate(sections, 1):
+            section_key = f"section_{i}"
+            if section_key in images:
+                section_title = section.get("h2", f"섹션 {i}")
+                section_image_html = f"""<figure class="fs-figure">
+<img src="{images[section_key]}" alt="{section_title} 이미지" loading="lazy">
+</figure>
+"""
+
+                # H2 태그를 찾아서 이미지 삽입
+                # 1. 정확한 제목으로 찾기
+                exact_pattern = f"<h2[^>]*>.*?{re.escape(section_title)}.*?</h2>"
+                if re.search(exact_pattern, content, flags=re.IGNORECASE | re.DOTALL):
+                    content = re.sub(
+                        exact_pattern,
+                        f"\\g<0>\n\n{section_image_html}",
+                        content,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    print(f"   ✅ 섹션 {i} 이미지 삽입 완료: {section_title}")
+                    continue
+
+                # 2. 부분 매칭으로 찾기 (제목의 일부만 포함)
+                partial_patterns = [
+                    f"<h2[^>]*>.*?{re.escape(section_title[:10])}.*?</h2>",  # 앞 10글자
+                    f"<h2[^>]*>.*?{re.escape(section_title[:5])}.*?</h2>",  # 앞 5글자
+                ]
+
+                for pattern in partial_patterns:
+                    if re.search(pattern, content, flags=re.IGNORECASE | re.DOTALL):
+                        content = re.sub(
+                            pattern,
+                            f"\\g<0>\n\n{section_image_html}",
+                            content,
+                            flags=re.IGNORECASE | re.DOTALL,
+                        )
+                        print(
+                            f"   ✅ 섹션 {i} 이미지 삽입 완료 (부분매칭): {section_title}"
+                        )
+                        break
+                else:
+                    # 3. 섹션 인덱스로 찾기 (section 태그 내의 H2)
+                    section_pattern = f"<section[^>]*>.*?<h2[^>]*>.*?</h2>"
+                    section_matches = list(
+                        re.finditer(
+                            section_pattern, content, flags=re.IGNORECASE | re.DOTALL
+                        )
+                    )
+
+                    # 실제 HTML에서는 핵심용어정리 섹션이 추가되므로 인덱스 조정
+                    # JSON 섹션 i → HTML 섹션 i (핵심용어정리가 0번, JSON 섹션 1이 HTML 섹션 1)
+                    adjusted_index = i  # i는 1부터 시작, 그대로 사용
+                    print(
+                        f"   🔍 섹션 {i} 디버깅: JSON 섹션 {i} → HTML 섹션 {adjusted_index} (총 {len(section_matches)}개 섹션)"
+                    )
+                    # 실제 섹션 제목들 출력
+                    for idx, match in enumerate(section_matches[:5]):  # 처음 5개만
+                        section_text = (
+                            match.group(0)[:100] + "..."
+                            if len(match.group(0)) > 100
+                            else match.group(0)
+                        )
+                        print(f"     HTML 섹션 {idx}: {section_text}")
+                    if adjusted_index < len(section_matches):
+                        section_match = section_matches[adjusted_index]
+                        section_start = section_match.start()
+                        section_end = section_match.end()
+
+                        # 해당 섹션의 H2 태그 찾기
+                        h2_in_section = re.search(
+                            r"<h2[^>]*>.*?</h2>",
+                            content[section_start:section_end],
+                            flags=re.IGNORECASE | re.DOTALL,
+                        )
+                        if h2_in_section:
+                            h2_start = section_start + h2_in_section.start()
+                            h2_end = section_start + h2_in_section.end()
+
+                            # H2 태그 뒤에 이미지 삽입
+                            content = (
+                                content[:h2_end]
+                                + "\n\n"
+                                + section_image_html
+                                + content[h2_end:]
+                            )
+                            print(
+                                f"   ✅ 섹션 {i} 이미지 삽입 완료 (인덱스매칭): {section_title}"
+                            )
+                            continue
+
+                    # 4. 디버깅을 위해 실제 H2 태그들 출력
+                    h2_matches = re.findall(
+                        r"<h2[^>]*>(.*?)</h2>", content, flags=re.IGNORECASE | re.DOTALL
+                    )
+                    print(f"   ⚠️ 섹션 {i} H2 태그를 찾을 수 없음: {section_title}")
+                    print(f"   📋 실제 H2 태그들: {h2_matches[:5]}")  # 처음 5개만 출력
+
+        return content
 
     def _sanitize_section_content(self, h2_title: str, content: str) -> str:
         """모델 응답에서 중복 H2/안내문 등을 제거하여 깔끔한 본문만 남긴다."""
@@ -1252,23 +1953,41 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
             print(f"❌ HTML 메타데이터 추가 중 오류 발생: {e}")
             return html_content
 
-    async def process_client(self, client_tuple, pbn_sites):
+    async def process_client(self, client_tuple, pbn_sites, test_keyword=None):
         """
         한 클라이언트에 대해 전체 포스팅 작업(키워드 선정, 콘텐츠 생성,
         워드프레스 업로드, DB 기록)을 수행합니다.
+
+        Args:
+            client_tuple: 클라이언트 정보 튜플
+            pbn_sites: PBN 사이트 목록
+            test_keyword: 테스트용 키워드 (단일 테스트 시 사용)
         """
         try:
             (client_id, client_name, client_site_url, _, _, _, _, _, _) = client_tuple
 
-            # 키워드 선정
-            keyword = get_random_keyword_for_client(client_id)
-            if not keyword:
-                print(f"클라이언트 {client_id}에 키워드가 없습니다. 건너뜁니다.")
-                return False
+            # 키워드 선정 (테스트용 키워드가 있으면 사용, 없으면 DB에서 랜덤 선택)
+            if test_keyword:
+                keyword = test_keyword
+                print(f"🧪 테스트용 키워드 사용: {keyword}")
+            else:
+                keyword = get_random_keyword_for_client(client_id)
+                if not keyword:
+                    print(f"클라이언트 {client_id}에 키워드가 없습니다. 건너뜁니다.")
+                    return False
 
             # PBN 사이트 랜덤 선택
-            pbn_site = random.choice(pbn_sites)
-            pbn_site_id, pbn_url, pbn_user, pbn_pass, pbn_app_pass = pbn_site
+            pbn_site_tuple = random.choice(pbn_sites)
+            pbn_site_id, pbn_url, pbn_user, pbn_pass, pbn_app_pass = pbn_site_tuple
+
+            # PBN 사이트 정보를 딕셔너리로 변환
+            pbn_site = {
+                "site_id": pbn_site_id,
+                "site_url": pbn_url,
+                "username": pbn_user,
+                "password": pbn_pass,
+                "app_password": pbn_app_pass,
+            }
 
             print(f"🌐 PBN 사이트 처리 중: {pbn_url}")
 
@@ -1350,10 +2069,26 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
                     post_content, keyword, client_site_url
                 )
 
-            # 워드프레스용 콘텐츠 정리
-            print("🔧 워드프레스 호환성을 위한 콘텐츠 정리...")
-            post_content = self._clean_content_for_wordpress(post_content)
-            self.save_debug_data(keyword, "cleaned_content", post_content, "html")
+            # 이미지 업로드 및 삽입 (이미지가 생성된 경우)
+            if "images" in content and content["images"]:
+                print("🖼️ 이미지 삽입 중...")
+                try:
+                    images_data = content["images"]
+                    if isinstance(images_data, dict) and images_data:
+                        # 이미 업로드된 URL이므로 바로 삽입
+                        post_content = self.insert_images_into_content(
+                            post_content, images_data, content.get("sections", [])
+                        )
+                        print(f"✅ {len(images_data)}개 이미지 삽입 완료")
+                    else:
+                        print("⚠️ 사용 가능한 이미지가 없습니다.")
+                except Exception as e:
+                    print(f"⚠️ 이미지 삽입 중 오류: {e} - 이미지 없이 진행")
+
+            # 워드프레스용 콘텐츠 정리 (비활성화 - 구조 유지)
+            # print("🔧 워드프레스 호환성을 위한 콘텐츠 정리...")
+            # post_content = self._clean_content_for_wordpress(post_content)
+            self.save_debug_data(keyword, "original_html", post_content, "html")
 
             # 최종 업로드용 콘텐츠 크기 재검사
             print("🔍 최종 업로드 전 콘텐츠 검사...")
@@ -1478,7 +2213,9 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
         # 3. 각 클라이언트에 대해 포스팅 작업 수행
         successful_posts = 0
         for idx, client_tuple in enumerate(day_list, start=1):
-            success = await self.process_client(client_tuple, pbn_sites)
+            success = await self.process_client(
+                client_tuple, pbn_sites, test_keyword=None
+            )
             result_text = "성공" if success else "실패"
             print(f"[{idx}/{len(day_list)}] 처리 결과: {result_text}")
             if success:
@@ -1527,6 +2264,7 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
         print("21. 🔗 PBN 콘텐츠 크롤링 (링크 데이터베이스 구축)")
         print("22. 📊 PBN 콘텐츠 데이터베이스 통계 조회")
         print("23. 🔍 키워드 기반 유사 포스트 검색 테스트")
+        print("24. 🧪 단일 테스트 실행 (사이트+키워드 지정)")
         print("q. 종료")
         print("==================================================")
 
@@ -1858,6 +2596,122 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
         except Exception as e:
             print(f"❌ 검색 중 오류 발생: {e}")
 
+    def single_test_prompt(self):
+        """단일 테스트 실행 (사이트+키워드 지정)"""
+        print("\n🧪 단일 테스트 실행")
+        print("=" * 50)
+
+        try:
+            # 1. 클라이언트 사이트 URL 입력
+            client_site_url = input("클라이언트 사이트 URL 입력: ").strip()
+            if not client_site_url:
+                print("❌ 사이트 URL이 입력되지 않았습니다.")
+                return
+
+            # URL 형식 검증
+            if not client_site_url.startswith(("http://", "https://")):
+                client_site_url = "https://" + client_site_url
+
+            # 2. 키워드 입력
+            keyword = input("테스트할 키워드 입력: ").strip()
+            if not keyword:
+                print("❌ 키워드가 입력되지 않았습니다.")
+                return
+
+            # 3. PBN 사이트 선택
+            print("\n📋 사용 가능한 PBN 사이트 목록:")
+            pbn_sites = get_all_pbn_sites()
+            if not pbn_sites:
+                print("❌ 사용 가능한 PBN 사이트가 없습니다.")
+                return
+
+            # 앱 패스워드가 있는 사이트만 필터링
+            valid_pbn_sites = [site for site in pbn_sites if site[4]]
+            if not valid_pbn_sites:
+                print("❌ 앱 패스워드가 설정된 PBN 사이트가 없습니다.")
+                return
+
+            print("사용 가능한 PBN 사이트:")
+            for i, site in enumerate(valid_pbn_sites, 1):
+                site_id, site_url, site_user, _, _ = site
+                print(f"  {i}. {site_url} (사용자: {site_user})")
+
+            # PBN 사이트 선택
+            while True:
+                try:
+                    choice = input(
+                        f"PBN 사이트 선택 (1-{len(valid_pbn_sites)}): "
+                    ).strip()
+                    if not choice.isdigit():
+                        print("❌ 숫자를 입력해주세요.")
+                        continue
+                    choice_idx = int(choice) - 1
+                    if 0 <= choice_idx < len(valid_pbn_sites):
+                        selected_pbn_site = valid_pbn_sites[choice_idx]
+                        break
+                    else:
+                        print(
+                            f"❌ 1부터 {len(valid_pbn_sites)} 사이의 숫자를 입력해주세요."
+                        )
+                except KeyboardInterrupt:
+                    print("\n❌ 테스트가 취소되었습니다.")
+                    return
+
+            # 4. 테스트용 클라이언트 튜플 생성
+            test_client_tuple = (
+                999,  # 임시 클라이언트 ID
+                "테스트 클라이언트",  # 클라이언트 이름
+                client_site_url,  # 클라이언트 사이트 URL
+                None,  # total_backlinks (사용하지 않음)
+                None,  # remaining_days (사용하지 않음)
+                None,  # built_count (사용하지 않음)
+                None,  # status (사용하지 않음)
+                None,  # daily_min (사용하지 않음)
+                None,  # daily_max (사용하지 않음)
+            )
+
+            print(f"\n🚀 테스트 시작")
+            print(f"   📝 키워드: {keyword}")
+            print(f"   🌐 클라이언트 사이트: {client_site_url}")
+            print(f"   🔗 PBN 사이트: {selected_pbn_site[1]}")
+            print("=" * 50)
+
+            # 5. PBN 사이트 정보를 딕셔너리로 변환
+            pbn_site_dict = {
+                "site_id": selected_pbn_site[0],
+                "site_url": selected_pbn_site[1],
+                "username": selected_pbn_site[2],
+                "password": selected_pbn_site[3],
+                "app_password": selected_pbn_site[4],
+            }
+
+            # 6. 단일 테스트 실행
+            success = asyncio.run(
+                self.process_client(
+                    test_client_tuple, [selected_pbn_site], test_keyword=keyword
+                )
+            )
+
+            # 6. 결과 출력
+            print("\n" + "=" * 50)
+            if success:
+                print("🎉 단일 테스트 성공!")
+                print(f"✅ 키워드 '{keyword}'에 대한 포스팅이 완료되었습니다.")
+                print(f"🔗 PBN 사이트: {selected_pbn_site[1]}")
+                print(f"🌐 클라이언트 사이트: {client_site_url}")
+            else:
+                print("❌ 단일 테스트 실패")
+                print("   💡 오류 로그를 확인하거나 다른 PBN 사이트를 시도해보세요.")
+            print("=" * 50)
+
+        except KeyboardInterrupt:
+            print("\n❌ 테스트가 사용자에 의해 취소되었습니다.")
+        except Exception as e:
+            print(f"❌ 테스트 중 오류 발생: {e}")
+            import traceback
+
+            traceback.print_exc()
+
     def main(self):
         """메인 실행 함수"""
         while True:
@@ -1925,6 +2779,8 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
                 self.view_pbn_database_stats_prompt()
             elif choice == "23":
                 self.test_similar_posts_prompt()
+            elif choice == "24":
+                self.single_test_prompt()
             elif choice == "q":
                 print("👋 시스템을 종료합니다.")
                 sys.exit(0)

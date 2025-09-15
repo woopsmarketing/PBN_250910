@@ -125,6 +125,81 @@ class WordPressManager:
         """워드프레스 매니저 초기화"""
         pass
 
+    def upload_image_to_wordpress(
+        self,
+        site_url: str,
+        username: str,
+        app_password: str,
+        image_path: str,
+        image_name: str = None,
+    ) -> tuple:
+        """
+        워드프레스에 이미지를 업로드합니다.
+
+        Args:
+            site_url: 워드프레스 사이트 URL
+            username: 워드프레스 사용자 이름
+            app_password: 워드프레스 앱 비밀번호
+            image_path: 업로드할 이미지 파일 경로
+            image_name: 업로드할 때 사용할 파일명 (선택사항)
+
+        Returns:
+            (image_id, image_url) 업로드 성공 시, (None, None) 실패 시
+        """
+        try:
+            from pathlib import Path
+            import mimetypes
+
+            # 파일 경로 확인
+            image_file = Path(image_path)
+            if not image_file.exists():
+                print(f"❌ 이미지 파일을 찾을 수 없습니다: {image_path}")
+                return None, None
+
+            # 파일명 설정
+            if not image_name:
+                image_name = image_file.name
+
+            # MIME 타입 확인
+            mime_type, _ = mimetypes.guess_type(str(image_file))
+            if not mime_type or not mime_type.startswith("image/"):
+                print(f"❌ 지원하지 않는 이미지 형식: {image_file}")
+                return None, None
+
+            # XML-RPC 클라이언트 생성
+            wp_xmlrpc_url = f"{site_url.rstrip('/')}/xmlrpc.php"
+            wp_client = Client(wp_xmlrpc_url, username, app_password)
+
+            # 이미지 파일 읽기
+            with open(image_file, "rb") as img_file:
+                image_data = img_file.read()
+
+            # 업로드 데이터 구성
+            upload_data = {
+                "name": image_name,
+                "type": mime_type,
+                "bits": xmlrpc.client.Binary(image_data),
+                "overwrite": True,
+            }
+
+            print(f"📤 이미지 업로드 중: {image_name} ({len(image_data)} bytes)")
+
+            # 이미지 업로드
+            response = wp_client.call(media.UploadFile(upload_data))
+
+            if response and "url" in response:
+                image_url = response["url"]
+                image_id = response["id"]
+                print(f"✅ 이미지 업로드 성공: {image_url} (ID: {image_id})")
+                return image_id, image_url
+            else:
+                print(f"❌ 이미지 업로드 실패: 응답 데이터 없음")
+                return None, None
+
+        except Exception as e:
+            print(f"❌ 이미지 업로드 중 오류 발생: {e}")
+            return None, None
+
     def create_post(
         self, site_url, username, app_password, title, content, status="publish"
     ):

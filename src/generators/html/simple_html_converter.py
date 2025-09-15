@@ -137,7 +137,7 @@ class SimpleHTMLConverter:
         # --- 구분선 제거
         content = re.sub(r"^---\s*$", "", content, flags=re.MULTILINE)
 
-        # 📍 이모지 제거 (섹션 제목에서)
+        # 이모지 제거 (섹션 제목에서)
         content = re.sub(r"📍 섹션 \d+: ", "", content)
         content = re.sub(r"📊 ", "", content)
 
@@ -210,12 +210,12 @@ class SimpleHTMLConverter:
             anchor_id = generate_anchor_id(title)
 
             # 특별한 섹션들에 대한 고정 ID
-            if "📖 핵심 용어 정리" in title:
+            if "핵심 용어 정리" in title:
                 anchor_id = "핵심-용어-정리"
-            elif "📚 목차" in title:
+            elif "목차" in title:
                 anchor_id = "toc-section"
 
-            return f'<h2 id="{anchor_id}" class="{self.css_classes["section_title"]}">{title}</h2>'
+            return f'<h2 id="{anchor_id}">{title}</h2>'
 
         # ## 뒤에 공백이 있거나 없는 경우 모두 매칭 (공백은 선택적)
         # 단, ###이나 ####는 이미 처리되었으므로 정확히 ##만 매칭
@@ -223,7 +223,7 @@ class SimpleHTMLConverter:
 
         # 이미 HTML로 변환된 핵심 용어 정리 섹션의 ID 수정
         content = re.sub(
-            r'<h2 id="terms-section">(📖\s*핵심\s*용어\s*정리)</h2>',
+            r'<h2 id="핵심-용어-정리">(핵심\s*용어\s*정리)</h2>',
             r'<h2 id="핵심-용어-정리" class="'
             + self.css_classes["section_title"]
             + r'">\1</h2>',
@@ -235,9 +235,7 @@ class SimpleHTMLConverter:
     def _convert_terms_section(self, content: str) -> str:
         """핵심 용어 정리 섹션의 **용어**: 설명 형태를 구조화된 HTML로 변환"""
         # 핵심 용어 정리 섹션 찾기 (HTML 변환 후 상태)
-        terms_section_pattern = (
-            r"(<h2[^>]*>📖 핵심 용어 정리</h2>.*?)(?=<h[12][^>]*>|$)"
-        )
+        terms_section_pattern = r"(<h2[^>]*>핵심 용어 정리</h2>.*?)(?=<h[12][^>]*>|$)"
 
         def convert_terms_content(match):
             """용어 정리 섹션 내용을 구조화된 HTML로 변환"""
@@ -513,7 +511,7 @@ class SimpleHTMLConverter:
     def _convert_toc_structure(self, content: str) -> str:
         """목차 구조를 시맨틱 nav > ol 구조로 변환"""
         # 목차 섹션 패턴: H2 제목 + 바로 다음 p 태그 (간단한 매칭)
-        toc_pattern = r"(<h2[^>]*>.*?📚.*?목차.*?</h2>)\s*\n\s*(<p>.*?</p>)"
+        toc_pattern = r"(<h2[^>]*>.*?목차.*?</h2>)\s*\n\s*(<p>.*?</p>)"
 
         def convert_toc_content(match):
             """목차 내용을 nav > ol 구조로 변환 (목차만 감싸기)"""
@@ -596,7 +594,7 @@ class SimpleHTMLConverter:
                 nav_pattern, "<!-- NAV_PLACEHOLDER -->", content, flags=re.DOTALL
             )
 
-        # H2 태그로 콘텐츠를 분할
+        # H2 태그로 콘텐츠를 분할 (더 정확한 패턴 사용)
         h2_pattern = r"(<h2[^>]*>.*?</h2>)"
 
         # H2 태그를 기준으로 분할
@@ -617,16 +615,26 @@ class SimpleHTMLConverter:
                     # 특수 섹션 클래스 확인
                     section_classes = [self.css_classes["section_wrapper"]]
 
-                    # FAQ 섹션 확인
-                    if re.search(r"FAQ", current_section, re.IGNORECASE):
-                        section_classes.append(self.css_classes["faq_section"])
-                    # 개요 섹션 확인
-                    elif re.search(r"개요", current_section, re.IGNORECASE):
-                        section_classes.append(self.css_classes["intro_section"])
-                    # 마무리 섹션 확인
-                    elif re.search(r"마무리|결론", current_section, re.IGNORECASE):
-                        section_classes.append(self.css_classes["conclusion_section"])
+                    # FAQ 섹션 확인 (H2 제목에서만 체크)
+                    h2_match = re.search(
+                        r"<h2[^>]*>(.*?)</h2>", current_section, re.IGNORECASE
+                    )
+                    if h2_match:
+                        h2_title = h2_match.group(1)
+                        if re.search(r"FAQ|질문|묻는", h2_title, re.IGNORECASE):
+                            section_classes.append(self.css_classes["faq_section"])
+                        # 개요 섹션 확인 (H2 제목에서만 체크)
+                        elif re.search(r"개요|소개|시작", h2_title, re.IGNORECASE):
+                            section_classes.append(self.css_classes["intro_section"])
+                        # 마무리 섹션 확인 (H2 제목에서만 체크)
+                        elif re.search(
+                            r"마무리|결론|끝으로|마지막", h2_title, re.IGNORECASE
+                        ):
+                            section_classes.append(
+                                self.css_classes["conclusion_section"]
+                            )
 
+                    # section 태그로 래핑
                     class_attr = " ".join(section_classes)
                     wrapped_section = (
                         f'<section class="{class_attr}">\n{current_section}\n</section>'
@@ -648,16 +656,20 @@ class SimpleHTMLConverter:
             # 특수 섹션 클래스 확인
             section_classes = [self.css_classes["section_wrapper"]]
 
-            # FAQ 섹션 확인
-            if re.search(r"FAQ", current_section, re.IGNORECASE):
-                section_classes.append(self.css_classes["faq_section"])
-            # 개요 섹션 확인
-            elif re.search(r"개요", current_section, re.IGNORECASE):
-                section_classes.append(self.css_classes["intro_section"])
-            # 마무리 섹션 확인
-            elif re.search(r"마무리|결론", current_section, re.IGNORECASE):
-                section_classes.append(self.css_classes["conclusion_section"])
+            # FAQ 섹션 확인 (H2 제목에서만 체크)
+            h2_match = re.search(r"<h2[^>]*>(.*?)</h2>", current_section, re.IGNORECASE)
+            if h2_match:
+                h2_title = h2_match.group(1)
+                if re.search(r"FAQ|질문|묻는", h2_title, re.IGNORECASE):
+                    section_classes.append(self.css_classes["faq_section"])
+                # 개요 섹션 확인 (H2 제목에서만 체크)
+                elif re.search(r"개요|소개|시작", h2_title, re.IGNORECASE):
+                    section_classes.append(self.css_classes["intro_section"])
+                # 마무리 섹션 확인 (H2 제목에서만 체크)
+                elif re.search(r"마무리|결론|끝으로|마지막", h2_title, re.IGNORECASE):
+                    section_classes.append(self.css_classes["conclusion_section"])
 
+            # section 태그로 래핑
             class_attr = " ".join(section_classes)
             wrapped_section = (
                 f'<section class="{class_attr}">\n{current_section}\n</section>'
@@ -667,19 +679,30 @@ class SimpleHTMLConverter:
         # nav 태그를 맨 앞에 추가 (섹션 밖에)
         final_content = "\n\n".join(result)
         if nav_content:
-            final_content = nav_content + "\n\n" + final_content
+            # 이미지를 목차 아래로 이동
+            final_content = self._move_image_after_toc(nav_content, final_content)
 
         return final_content
 
+    def _move_image_after_toc(self, nav_content: str, final_content: str) -> str:
+        """이미지를 목차 아래로 이동"""
+        # figure 태그를 찾아서 추출
+        figure_pattern = r'(<figure class="fs-figure">.*?</figure>)'
+        figure_match = re.search(figure_pattern, final_content, re.DOTALL)
+
+        if figure_match:
+            figure_content = figure_match.group(1)
+            # 원본에서 figure 태그 제거
+            final_content = re.sub(figure_pattern, "", final_content, flags=re.DOTALL)
+            # 목차 아래에 이미지 추가
+            return nav_content + "\n\n" + figure_content + "\n\n" + final_content
+        else:
+            # 이미지가 없으면 그대로 목차만 추가
+            return nav_content + "\n\n" + final_content
+
     def _wrap_with_article(self, content: str) -> str:
         """전체 콘텐츠를 article 태그로 감싸기"""
-        return (
-            f'<article class="{self.css_classes["article_wrapper"]}">'
-            + "\n"
-            + content
-            + "\n"
-            + "</article>"
-        )
+        return '<article class="fs-article">' + "\n" + content + "\n" + "</article>"
 
     def _cleanup_html(self, content: str) -> str:
         """HTML 정리 작업"""
