@@ -193,6 +193,58 @@ class ImprovedSimilaritySystem:
         except Exception as e:
             print(f"❌ 인덱스 저장 실패: {e}")
 
+    def add_new_post_to_index(self, post_data: Dict[str, Any]) -> bool:
+        """
+        새 포스트를 FAISS 인덱스에 실시간 추가
+
+        Args:
+            post_data: 포스트 데이터 (site_id, site_url, post_id, title, url, excerpt, date_published, word_count)
+
+        Returns:
+            bool: 성공 여부
+        """
+        if not self.similarity_model or not self.faiss_index:
+            print("❌ 유사도 모델 또는 FAISS 인덱스가 초기화되지 않았습니다.")
+            return False
+
+        try:
+            print(f"🔄 새 포스트를 FAISS 인덱스에 추가 중: {post_data['title']}")
+
+            # 1. 새 포스트의 제목을 벡터로 변환
+            title_embedding = self.similarity_model.encode([post_data["title"]])
+            title_embedding = title_embedding.astype(np.float32)
+
+            # 2. 벡터 정규화
+            faiss.normalize_L2(title_embedding)
+
+            # 3. FAISS 인덱스에 추가
+            self.faiss_index.add(title_embedding)
+
+            # 4. 메타데이터에 추가
+            new_metadata = {
+                "site_id": post_data["site_id"],
+                "site_url": post_data["site_url"],
+                "post_id": post_data["post_id"],
+                "title": post_data["title"],
+                "url": post_data["url"],
+                "excerpt": post_data["excerpt"],
+                "date_published": post_data["date_published"],
+                "word_count": post_data["word_count"],
+            }
+            self.post_metadata.append(new_metadata)
+
+            # 5. 인덱스 저장
+            self._save_index()
+
+            print(
+                f"✅ 새 포스트가 FAISS 인덱스에 추가되었습니다. (총 {len(self.post_metadata)}개)"
+            )
+            return True
+
+        except Exception as e:
+            print(f"❌ FAISS 인덱스 업데이트 실패: {e}")
+            return False
+
     def _get_all_posts_from_db(self) -> List[Dict[str, Any]]:
         """데이터베이스에서 모든 포스트 가져오기"""
         with sqlite3.connect(self.db_path) as conn:
@@ -286,26 +338,65 @@ class ImprovedSimilaritySystem:
                 }
                 candidates.append(result)
 
+            # 최신 글 우선 정렬 (날짜 기준) - 개선된 버전
+            from datetime import datetime
+
+            def safe_date_sort(post):
+                """안전한 날짜 정렬을 위한 함수"""
+                try:
+                    # ISO 형식 날짜 파싱
+                    if post.get("date_published"):
+                        return datetime.fromisoformat(
+                            post["date_published"].replace("Z", "+00:00")
+                        )
+                    else:
+                        # 날짜가 없으면 매우 오래된 것으로 처리
+                        return datetime.min
+                except (ValueError, TypeError):
+                    # 날짜 파싱 실패 시 오래된 것으로 처리
+                    return datetime.min
+
+            # 최신 글 우선으로 정렬 (날짜 내림차순)
+            candidates.sort(key=safe_date_sort, reverse=True)
+
+            # 최신 글 정보 출력
+            if candidates:
+                latest_date = safe_date_sort(candidates[0])
+                oldest_date = safe_date_sort(candidates[-1])
+                print(
+                    f"📅 검색된 포스트 날짜 범위: {oldest_date.strftime('%Y-%m-%d')} ~ {latest_date.strftime('%Y-%m-%d')}"
+                )
+
             # 랜덤 선택 또는 상위 선택
             if random_selection and len(candidates) > limit:
                 import random
 
-                # 상위 50% 또는 최소 limit*2개 중에서 선택
-                top_group_size = max(limit * 2, len(candidates) // 2)
-                top_candidates = candidates[:top_group_size]
+                # 최신 글들을 우선적으로 포함하여 선택
+                # 상위 30%는 최신 글, 나머지 70%는 유사도 기반
+                recent_count = max(1, min(limit // 2, len(candidates) // 3))
+                recent_candidates = candidates[:recent_count]
 
-                # 랜덤으로 limit개 선택
-                selected = random.sample(
-                    top_candidates, min(limit, len(top_candidates))
-                )
+                # 나머지는 전체에서 랜덤 선택
+                remaining_count = limit - recent_count
+                if remaining_count > 0 and len(candidates) > recent_count:
+                    other_candidates = candidates[recent_count:]
+                    other_selected = random.sample(
+                        other_candidates, min(remaining_count, len(other_candidates))
+                    )
+                    selected = recent_candidates + other_selected
+                else:
+                    selected = recent_candidates
 
                 print(
-                    f"🎲 {len(candidates)}개 후보 중 상위 {top_group_size}개에서 랜덤 선택: {len(selected)}개"
+                    f"🎲 {len(candidates)}개 후보 중 최신 {recent_count}개 + 랜덤 {len(selected)-recent_count}개 선택: {len(selected)}개"
                 )
                 return selected
             else:
+                # 랜덤 선택이 아닌 경우 최신 글 우선으로 반환
                 results = candidates[:limit]
-                print(f"🚀 FAISS 검색 완료: {len(results)}개 유사 포스트 발견")
+                print(
+                    f"🚀 FAISS 검색 완료: {len(results)}개 유사 포스트 발견 (최신 글 우선)"
+                )
                 return results
 
         except Exception as e:

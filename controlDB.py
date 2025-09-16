@@ -88,6 +88,27 @@ def create_tables():
     """
     )
 
+    # PBN 포스트 테이블 (크롤링된 포스트들)
+    cursor.execute(
+        """
+    CREATE TABLE IF NOT EXISTS pbn_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        site_id INTEGER NOT NULL,
+        site_url TEXT NOT NULL,
+        post_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        excerpt TEXT,
+        date_published TEXT,
+        word_count INTEGER,
+        categories TEXT,
+        tags TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+    )
+
     conn.commit()
     conn.close()
 
@@ -567,6 +588,71 @@ def add_post(client_id, client_name, client_site_url, keyword, pbn_url):
     )
     conn.commit()
     conn.close()
+
+
+def add_pbn_post(
+    site_id,
+    site_url,
+    post_id,
+    title,
+    url,
+    excerpt,
+    date_published,
+    word_count,
+    categories=None,
+    tags=None,
+):
+    """
+    새로 생성된 포스트를 pbn_posts 테이블에 추가
+
+    Args:
+        site_id: PBN 사이트 ID
+        site_url: PBN 사이트 URL
+        post_id: WordPress 포스트 ID
+        title: 포스트 제목
+        url: 포스트 URL
+        excerpt: 포스트 요약
+        date_published: 발행일 (ISO 형식)
+        word_count: 단어 수
+        categories: 카테고리 리스트 (선택사항)
+        tags: 태그 리스트 (선택사항)
+    """
+    import json
+    from datetime import datetime
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            INSERT INTO pbn_posts 
+            (site_id, site_url, post_id, title, url, excerpt, date_published, word_count, categories, tags, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                site_id,
+                site_url,
+                post_id,
+                title,
+                url,
+                excerpt,
+                date_published,
+                word_count,
+                json.dumps(categories or [], ensure_ascii=False),
+                json.dumps(tags or [], ensure_ascii=False),
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ),
+        )
+        conn.commit()
+        print(f"   💾 pbn_posts 테이블에 포스트 추가 완료: {title}")
+        return True
+    except Exception as e:
+        print(f"   ❌ pbn_posts 테이블 추가 실패: {e}")
+        return False
+    finally:
+        conn.close()
 
 
 def view_client_status(client_id):

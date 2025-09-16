@@ -542,7 +542,35 @@ class PBNContentCrawler:
                 post["similarity_score"] = float(similarity_score)
                 results.append(post)
 
-            print(f"✅ {len(results)}개의 유사한 포스트를 찾았습니다.")
+            # 최신 글 우선 정렬 (날짜 기준) - 개선된 버전
+            from datetime import datetime
+
+            def safe_date_sort(post):
+                """안전한 날짜 정렬을 위한 함수"""
+                try:
+                    # ISO 형식 날짜 파싱
+                    date_str = post.get("date_published", "")
+                    if date_str:
+                        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    else:
+                        # 날짜가 없으면 매우 오래된 것으로 처리
+                        return datetime.min
+                except (ValueError, TypeError):
+                    # 날짜 파싱 실패 시 오래된 것으로 처리
+                    return datetime.min
+
+            # 최신 글 우선으로 정렬 (날짜 내림차순)
+            results.sort(key=safe_date_sort, reverse=True)
+
+            # 최신 글 정보 출력
+            if results:
+                latest_date = safe_date_sort(results[0])
+                oldest_date = safe_date_sort(results[-1])
+                print(
+                    f"📅 검색된 포스트 날짜 범위: {oldest_date.strftime('%Y-%m-%d')} ~ {latest_date.strftime('%Y-%m-%d')}"
+                )
+
+            print(f"✅ {len(results)}개의 유사한 포스트를 찾았습니다. (최신 글 우선)")
             return results
 
         except Exception as e:

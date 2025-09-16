@@ -712,7 +712,62 @@ class EnhancedPBNSystem:
                     keyword,
                     post_url,
                 )
-                print(f"   💾 포스트 기록 저장 완료: {post_url}")
+                print(f"   💾 posts 테이블에 포스트 기록 저장 완료: {post_url}")
+
+                # pbn_posts 테이블에도 추가
+                from controlDB import add_pbn_post
+                from datetime import datetime
+
+                # PBN 사이트 ID 추출 (pbn_site에서 첫 번째 요소)
+                pbn_site_id = pbn_site[0]
+
+                # 포스트 요약 생성 (제목의 일부를 사용)
+                excerpt = (
+                    content["title"][:100] + "..."
+                    if len(content["title"]) > 100
+                    else content["title"]
+                )
+
+                # 단어 수 계산
+                word_count = len(content["content"].split())
+
+                # pbn_posts에 추가
+                add_pbn_post(
+                    site_id=pbn_site_id,
+                    site_url=pbn_url,
+                    post_id=success,
+                    title=content["title"],
+                    url=post_url,
+                    excerpt=excerpt,
+                    date_published=datetime.now().isoformat(),
+                    word_count=word_count,
+                    categories=[],
+                    tags=[],
+                )
+
+                # FAISS 인덱스에 실시간 추가
+                if hasattr(self, "similarity_system") and self.similarity_system:
+                    post_data = {
+                        "site_id": pbn_site_id,
+                        "site_url": pbn_url,
+                        "post_id": success,
+                        "title": content["title"],
+                        "url": post_url,
+                        "excerpt": excerpt,
+                        "date_published": datetime.now().isoformat(),
+                        "word_count": word_count,
+                    }
+
+                    faiss_success = self.similarity_system.add_new_post_to_index(
+                        post_data
+                    )
+                    if faiss_success:
+                        print(f"   🔄 FAISS 인덱스 업데이트 완료")
+                    else:
+                        print(
+                            f"   ⚠️ FAISS 인덱스 업데이트 실패 (유사도 검색에 반영되지 않음)"
+                        )
+
                 print(f"🎉 {client_name}에 대한 포스팅 완료!")
                 time.sleep(10)
                 return True
@@ -792,13 +847,50 @@ class EnhancedPBNSystem:
         """
         day_list = []
         client_id_set = set()
+        client_work_details = []  # 각 클라이언트별 작업량 상세 정보
+
+        print("\n📋 오늘 작업 할당량 상세:")
+        print("=" * 50)
+
         for c in clients:
-            (client_id, _, _, _, _, _, _, daily_min, daily_max) = c
+            (client_id, client_name, site_url, _, _, _, _, daily_min, daily_max) = c
             today_count = random.randint(daily_min, daily_max)
+
+            # 클라이언트별 작업량 정보 저장
+            client_work_details.append(
+                {
+                    "client_id": client_id,
+                    "client_name": client_name,
+                    "site_url": site_url,
+                    "daily_min": daily_min,
+                    "daily_max": daily_max,
+                    "today_count": today_count,
+                }
+            )
+
+            # day_list에 추가
             for _ in range(today_count):
                 day_list.append(c)
             client_id_set.add(client_id)
+
+            print(f"🔹 {client_name} (ID: {client_id})")
+            print(
+                f"   📊 할당 범위: {daily_min}-{daily_max}개 → 오늘 {today_count}개 선택"
+            )
+            print(f"   🌐 사이트: {site_url}")
+            print()
+
+        # day_list를 랜덤으로 섞기
         random.shuffle(day_list)
+
+        # 작업 순서 출력
+        print("📝 오늘 작업 순서 (개별 작업 단위로 랜덤 섞임):")
+        print("-" * 50)
+        for i, client_tuple in enumerate(day_list, 1):
+            (client_id, client_name, site_url, _, _, _, _, _, _) = client_tuple
+            print(f"  {i}. {client_name} (ID: {client_id})")
+        print("-" * 50)
+
         return day_list, client_id_set
 
     async def generate_title_keywords(self, keyword: str) -> Dict[str, Any]:
@@ -1143,7 +1235,7 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
         )
 
         # 용어 섹션 포맷팅 (앙커 ID 포함)
-        terms_section = '<h2 id="terms-section"> 핵심 용어 정리</h2>\n\n'
+        terms_section = '<h2 id="핵심-용어-정리"> 핵심 용어 정리</h2>\n\n'
         terms_section += "본문을 읽기 전에 알아두면 좋은 용어들입니다.\n\n"
 
         # LLM 응답을 파싱하여 용어 정리 (개선된 파싱)
@@ -2210,14 +2302,42 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
         print(f"👥 총 {len(active_clients)}명의 클라이언트를 찾았습니다.")
         print(f"📝 오늘 처리할 총 작업 수: {len(day_list)}")
 
+        # 클라이언트별 작업량 요약
+        client_summary = {}
+        for client_tuple in day_list:
+            (client_id, client_name, _, _, _, _, _, _, _) = client_tuple
+            if client_id not in client_summary:
+                client_summary[client_id] = {"name": client_name, "count": 0}
+            client_summary[client_id]["count"] += 1
+
+        print(f"\n📊 클라이언트별 작업량 요약:")
+        for client_id, info in client_summary.items():
+            print(f"   • {info['name']}: {info['count']}개")
+        print("=" * 50)
+
         # 3. 각 클라이언트에 대해 포스팅 작업 수행
+        print(f"\n🚀 포스팅 작업 시작...")
+        print("=" * 50)
         successful_posts = 0
+
         for idx, client_tuple in enumerate(day_list, start=1):
+            (client_id, client_name, site_url, _, _, _, _, _, _) = client_tuple
+
+            print(f"\n📝 [{idx}/{len(day_list)}] 작업 시작")
+            print(f"   👤 클라이언트: {client_name} (ID: {client_id})")
+            print(f"   🌐 사이트: {site_url}")
+            print(f"   ⏰ 시작 시간: {datetime.now().strftime('%H:%M:%S')}")
+            print("-" * 30)
+
             success = await self.process_client(
                 client_tuple, pbn_sites, test_keyword=None
             )
-            result_text = "성공" if success else "실패"
-            print(f"[{idx}/{len(day_list)}] 처리 결과: {result_text}")
+
+            result_text = "✅ 성공" if success else "❌ 실패"
+            print(f"\n📊 [{idx}/{len(day_list)}] 작업 완료: {result_text}")
+            print(f"   ⏰ 완료 시간: {datetime.now().strftime('%H:%M:%S')}")
+            print("=" * 50)
+
             if success:
                 successful_posts += 1
 
@@ -2225,17 +2345,40 @@ LSI 키워드: {', '.join(lsi_keywords[:5])}
         self.update_client_status(client_id_set)
 
         # 최종 결과 출력
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 60)
         print("🎉 자동화된 백링크 캠페인 완료")
-        print(f"📊 총 포스트 수: {len(day_list)}")
-        print(f"✅ 성공한 포스트: {successful_posts}")
-        print(f"❌ 실패한 포스트: {len(day_list) - successful_posts}")
+        print("=" * 60)
+
+        # 클라이언트별 성공/실패 통계
+        print(f"\n📊 상세 결과:")
+        client_results = {}
+        for client_tuple in day_list:
+            (client_id, client_name, _, _, _, _, _, _, _) = client_tuple
+            if client_id not in client_results:
+                client_results[client_id] = {
+                    "name": client_name,
+                    "total": 0,
+                    "success": 0,
+                }
+            client_results[client_id]["total"] += 1
+
+        # 실제 성공/실패는 추적하기 어려우므로 전체 통계만 표시
+        print(f"   📝 총 포스트 수: {len(day_list)}")
+        print(f"   ✅ 성공한 포스트: {successful_posts}")
+        print(f"   ❌ 실패한 포스트: {len(day_list) - successful_posts}")
         print(
-            f"📈 성공률: {(successful_posts/len(day_list)*100):.1f}%"
+            f"   📈 성공률: {(successful_posts/len(day_list)*100):.1f}%"
             if len(day_list) > 0
             else "0%"
         )
-        print("오늘 작업을 모두 마쳤습니다.")
+
+        print(f"\n👥 클라이언트별 작업량:")
+        for client_id, info in client_results.items():
+            print(f"   • {info['name']}: {info['total']}개 처리")
+
+        print(f"\n⏰ 작업 완료 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 60)
+        print("오늘 작업을 모두 마쳤습니다. 수고하셨습니다! 🎯")
 
     # ========== 관리자 메뉴 기능들 ==========
 
